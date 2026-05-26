@@ -66,7 +66,7 @@ export default function SummaryTable({
 
   // Converts markdown to clean HTML for document download/copy contexts
   const markdownToHtml = (rawText: string) => {
-    if (!rawText) return "해당 정보 없음";
+    if (!rawText) return "";
     
     return rawText
       .split("\n")
@@ -237,7 +237,7 @@ export default function SummaryTable({
             </tr>
             <tr>
               <th style="background-color: #EBF8FF; color: #2B6CB0; font-weight: bold; padding: 10px 12px; font-size: 11px; width: 150px; border: 1px solid #CBD5E0; text-align: left;">통계분석방법</th>
-              <td style="padding: 10px 12px; border: 1px solid #CBD5E0;">${markdownToHtml(summary.statisticalMethods || "해당 정보 없음")}</td>
+              <td style="padding: 10px 12px; border: 1px solid #CBD5E0;">${markdownToHtml(summary.statisticalMethods)}</td>
             </tr>
             <tr>
               <th style="background-color: #EBF8FF; color: #2B6CB0; font-weight: bold; padding: 10px 12px; font-size: 11px; width: 150px; border: 1px solid #CBD5E0; text-align: left;">중재형태</th>
@@ -339,7 +339,7 @@ export default function SummaryTable({
 
   // Smart text parser that turns key-value and custom bullet points into structured submission layouts
   const renderLines = (text: string) => {
-    if (!text) return <span className="text-gray-400 font-normal">해당 정보 없음</span>;
+    if (!text || !text.trim()) return null;
     
     // Normalizing text output (preventing blank lines or repeated bullet clutter)
     const rawLines = text.split("\n");
@@ -679,7 +679,7 @@ export default function SummaryTable({
                     통계분석방법
                   </th>
                   <td className="p-3 border border-slate-300 text-slate-700 text-[13px] leading-relaxed">
-                    {renderLines(summary.statisticalMethods || "해당 정보 없음")}
+                    {renderLines(summary.statisticalMethods)}
                   </td>
                 </tr>
                 <tr>
@@ -775,8 +775,88 @@ export default function SummaryTable({
               </tbody>
             </table>
           </div>
+
+          {/* ── 주요 표 재현 ─────────────────────────────────────────── */}
+          {summary.keyTables && summary.keyTables.length > 0 && (
+            <div className="mt-6">
+              <h3 className="text-base font-bold text-blue-900 mb-4 flex items-center gap-2">
+                <span className="w-6 h-6 bg-blue-900 text-white rounded text-xs flex items-center justify-center font-bold">표</span>
+                논문 주요 표 재현
+              </h3>
+              <div className="space-y-6">
+                {summary.keyTables.map((tbl, ti) => (
+                  <div key={ti} className="border border-slate-300 rounded-lg overflow-hidden">
+                    <div className="bg-blue-900 text-white text-xs font-bold px-4 py-2.5">{tbl.title}</div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[12px] border-collapse">
+                        <thead>
+                          <tr className="bg-blue-50">
+                            {tbl.headers.map((h, hi) => (
+                              <th key={hi} className="border border-slate-300 px-3 py-2 text-left font-bold text-blue-900 whitespace-nowrap">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tbl.rows.map((row, ri) => (
+                            <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-slate-50"}>
+                              {row.map((cell, ci) => (
+                                <td key={ci} className={`border border-slate-200 px-3 py-2 ${ci === 0 ? "font-medium text-slate-700" : "text-slate-600 text-center"}`}>{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {tbl.footnote && (
+                      <div className="bg-slate-50 border-t border-slate-200 px-4 py-2 text-[11px] text-slate-500">{tbl.footnote}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── 주요 그림 설명 ───────────────────────────────────────── */}
+          {summary.keyFigures && summary.keyFigures.length > 0 && (
+            <div className="mt-6">
+              <h3 className="text-base font-bold text-blue-900 mb-4 flex items-center gap-2">
+                <span className="w-6 h-6 bg-blue-900 text-white rounded text-xs flex items-center justify-center font-bold">그</span>
+                논문 주요 그림 (Figure) 설명
+              </h3>
+              <div className="grid grid-cols-1 gap-4">
+                {summary.keyFigures.map((fig, fi) => (
+                  <div key={fi} className="border border-slate-300 rounded-lg overflow-hidden">
+                    <div className="bg-slate-700 text-white px-4 py-2.5 flex items-center gap-3">
+                      <span className="text-xs font-bold bg-white text-slate-700 px-2 py-0.5 rounded shrink-0">{fig.label}</span>
+                      <span className="text-xs font-semibold">{fig.title}</span>
+                    </div>
+                    <div className="p-4 bg-white space-y-3">
+                      {/* 그래프 시각화 힌트 영역 */}
+                      <div className="bg-slate-50 border-2 border-dashed border-slate-300 rounded-lg p-4 text-center">
+                        <div className="text-slate-400 text-3xl mb-1">
+                          {fig.title.toLowerCase().includes("kaplan") || fig.title.toLowerCase().includes("survival") || fig.title.toLowerCase().includes("pfs") || fig.title.toLowerCase().includes("os")
+                            ? "📈" : fig.title.toLowerCase().includes("bar") || fig.title.toLowerCase().includes("response") ? "📊" : "🖼️"}
+                        </div>
+                        <p className="text-xs text-slate-500 font-medium">{fig.label} — 원본 논문에서 확인</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-700 mb-1">그림 내용 설명</p>
+                        <p className="text-[12px] text-slate-600 leading-relaxed">{fig.description}</p>
+                      </div>
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5">
+                        <p className="text-xs font-bold text-blue-800 mb-1">📌 핵심 수치</p>
+                        <p className="text-[12px] text-blue-700 leading-relaxed">{fig.keyFindings}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
     </div>
   );
+}
 }

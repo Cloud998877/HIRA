@@ -76,148 +76,218 @@ export default function App() {
       return;
     }
 
-    // VITE_GEMINI_API_KEY: Vercel 환경변수에서 가져옴 (브라우저 직접 호출 — 서버 타임아웃 없음)
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY as string;
-    if (!apiKey) {
+    // API 키 확인 — OpenAI 우선, 없으면 Gemini 사용
+    const openaiKey = import.meta.env.VITE_OPENAI_API_KEY as string;
+    const geminiKey = import.meta.env.VITE_GEMINI_API_KEY as string;
+    const useOpenAI = !!openaiKey;
+
+    if (!openaiKey && !geminiKey) {
       setErrorMessage(
-        "API 키가 설정되지 않았습니다.\n" +
-        "Vercel 프로젝트 설정 > Environment Variables 에서\n" +
-        "VITE_GEMINI_API_KEY = (발급받은 Gemini API 키) 를 추가하고 재배포해 주세요."
+        "API 키가 설정되지 않았습니다.\n\n" +
+        "Vercel 프로젝트 설정 > Environment Variables 에서 아래 중 하나를 추가하세요:\n\n" +
+        "OpenAI 사용 시: VITE_OPENAI_API_KEY = sk-...\n" +
+        "Gemini 사용 시: VITE_GEMINI_API_KEY = AIza..."
       );
       return;
     }
 
     setLoading(true);
     setErrorMessage(null);
-    setLoadingStep("Gemini AI와 연결 중...");
+    setLoadingStep(useOpenAI ? "GPT-5.5와 연결 중..." : "Gemini AI와 연결 중...");
 
     const SYSTEM_INSTRUCTION = `당신은 대한민국 건강보험심사평가원(심평원) 제출용 임상시험 문헌 요약표(표6)를 작성하는 최고 수준의 의학 전문 분석가입니다.
+당신의 역할은 영문 임상시험 논문 전체를 한국어로 완전히 번역하여 심평원 표6 서식에 맞게 재구성하는 것입니다.
 
-[핵심 원칙 — 반드시 준수]
-1. 문장 어미: 모든 항목의 모든 줄은 반드시 "~임.", "~함.", "~확인됨.", "~나타남.", "~투여됨.", "~분석됨." 등 한국어 명사형 격식체로 완전히 끝날 것. 숫자·약어만 있는 줄 절대 금지.
-2. 분량과 상세도: 각 항목은 원문에 기재된 내용을 빠짐없이 번역·기술할 것. "해당 정보 없음"은 논문에 실제로 없는 경우에만 허용. 항목당 최소 3줄 이상 기재 원칙.
-3. 수치 완전성: HR, OR, LSM 변화량, 95% CI, p-value, 퍼센트(%), 명수(N) 등 모든 통계 수치는 완전한 세트로 빠짐없이 기재. 단 하나도 생략 금지.
-4. 포함·제외 기준: 원문에 명시된 모든 기준을 번호 목록으로 기재. 수치 기준(나이, 점수, 농도 등) 반드시 포함. 10개 이상이어도 전부 기재.
-5. 피험자 특성: 양군의 기저 특성(연령, 성별, 유전자형, 인지 점수, 병기, 특수 바이오마커 등)을 1:1 비교 형식으로 전부 기재.
-6. 중도탈락: 스크리닝 인원 → 배제 이유별 인원 → 무작위배정 인원 → 완료 인원까지 전체 흐름 기재. 탈락 사유도 항목별로 명수 포함.
-7. 시험결과: 1차·2차 평가변수의 서브그룹별 결과를 모두 기재. 유효성 지연 % 효과, 절대적 수치 차이, 아밀로이드/바이오마커 결과도 포함. 안전성은 ARIA 부종·미세출혈 등 항목별 양군 비교.
-8. 통계방법: 1차 분석 방법(MMRM 등), 다중비교 보정, 검정력/표본수 산출, 민감도 분석 방법명(NCS3, DPM 등)을 모두 기재.
-9. 한계·민감도·연구자관점: 원문 및 논문 맥락에서 도출 가능한 구체적 내용 반드시 3개 이상 기재.
-10. 볼드(**) 처리: 핵심 통계치, 비교 수치, 중요 결론을 ** 으로 강조.
-11. 리스트 형식 준수: "- **항목명**: 서술(~임.)" 또는 "1) 항목명: 서술(~임.)" 형식. 줄글 문단 금지.`;
+[절대 금지 사항 — 위반 시 분석 실패로 간주]
+★ "해당 정보 없음", "논문에 명시되어 있지 않아", "정보 없음", "N/A" 등의 표현 절대 사용 금지.
+★ 정보가 없는 항목·불릿은 아예 기재하지 말 것. 있는 내용만 상세히 기재.
+★ 단순 나열(숫자만, 약어만) 금지 — 반드시 완전한 문장으로 서술.
+★ 빈 항목 제출 금지 — 논문에서 찾을 수 있는 모든 관련 정보를 총동원하여 기재.
 
-    const userPrompt = `다음 임상문헌을 분석하여 심평원 표6 서식에 맞게 아래 JSON 형식으로 완전하고 상세하게 작성하세요.
-코드블록(\`\`\`) 없이 순수 JSON만 반환하세요.
+[핵심 작성 원칙]
+1. 문장 어미: 모든 줄은 반드시 "~임.", "~함.", "~확인됨.", "~나타남.", "~투여됨.", "~분석됨.", "~보고됨." 등 한국어 명사형 격식체로 완전히 끝낼 것.
+2. 완전 번역 원칙: 논문의 Methods, Results, Discussion, Supplementary 등 모든 섹션을 샅샅이 읽고 관련 정보를 빠짐없이 추출하여 번역·기재. 논문에 있는 내용을 "없다"고 판단하면 안 됨.
+3. 수치 완전성: HR, OR, RR, RRR, LSM, 95% CI, p-value, %, N 등 모든 통계 수치는 완전한 세트로 기재. 소수점까지 정확히.
+4. 포함·제외 기준: 논문 본문·부록·e-supplement 어디서든 찾아서 모든 기준을 번호 목록으로 기재. 나이, 점수, 검사 수치 등 구체적 기준값 반드시 포함.
+5. 피험자 특성: 모든 군의 기저 특성(연령, 성별, 인종, 유전자형, 인지점수, 바이오마커 등)을 군별 비교 형식으로 전부 기재.
+6. 중도탈락: 스크리닝 → 제외 사유별 → 무작위배정 → 탈락 사유별 → 완료까지 CONSORT 흐름 전체 기재.
+7. 시험결과: 모든 평가변수의 모든 서브그룹 결과 기재. 치료 효과의 절대적 수치·상대적 수치·통계 검정 모두 포함.
+8. 통계방법: 논문 Statistical Analysis 섹션을 완전히 번역하여 분석 방법, 검정력, 표본수 산출, 민감도 분석까지 전부 기재.
+9. 볼드 강조: **핵심 통계치**, **비교 수치**, **결론 키워드** 에 ** 마크다운 볼드 적용.
+10. 리스트 형식: "- **항목**: 서술(~임.)" 또는 "1) 항목: 서술(~임.)" 형식 고수. 줄글 문단 절대 금지.`;
+
+    const userPrompt = `다음 임상시험 논문 전문을 분석하여 심평원 표6 서식에 맞게 한국어로 완전히 번역·재구성하세요.
+코드블록 없이 순수 JSON만 반환하세요.
 
 [기본정보] 연번: ${seq} / 문헌구분: ${type} / 추가요청: ${extra || "없음"}
 
-[논문내용]
-${text.slice(0, 8000)}
+[논문 전문]
+${text.slice(0, 28000)}
 
-===== 작성 지침 =====
-• 각 JSON 값은 원문에서 추출할 수 있는 모든 내용을 담아야 함
-• 줄바꿈은 \n으로 표현
-• 모든 문장은 "~임.", "~함.", "~확인됨." 등으로 끝낼 것
-• 수치는 완전한 세트(값 + 95% CI + p값)로 기재
+===== 핵심 작성 규칙 =====
+1. "해당 정보 없음" 절대 금지 — 정보가 없으면 그 항목 자체를 생략
+2. 논문에서 찾을 수 있는 모든 수치·조건·결과를 빠짐없이 번역하여 기재
+3. 줄바꿈은 \n으로 표현 (실제 개행 금지)
+4. 모든 문장은 "~임.", "~함.", "~확인됨." 등으로 끝낼 것
+5. 통계 수치는 값 + 95% CI + p값 완전한 세트로 기재
 
-아래 JSON 키를 모두 채워서 반환 (각 항목 상세히):
+아래 JSON 키를 모두 채워 반환 (★ 모르면 빈칸이 아니라 논문에서 추론하여 기재. 정말 없으면 해당 key 값을 빈 문자열 "" 로 반환):
 {
-  "title": "논문 영문 제목 전체 (괄호 안에 한글 번역 병기, 부제목 포함)",
-  "citation": "First Author, Second Author, et al. 저널명 전체. 연도;권(호):시작페이지-끝페이지. doi:...",
-  "countries": "참여 국가명 전체 목록 (국가명 쉼표 구분, 총 N개국)",
-  "authors": "주요 저자 전체 이름 나열 (et al. 처리 전 최소 5인), 소속기관명",
-  "affiliation": "교신저자 성명 및 소속기관 전체명 (영문 + 한글 번역)",
-  "objective": "- **연구 배경**: 배경 및 임상적 필요성(~함.)\n- **1차 목적**: 1차 목적 서술(~평가하고자 함.)\n- **2차 목적**: 추가 목적 서술(~분석하고자 함.)",
-  "inclusion": "1) 연령: 구체적 연령 범위임.\n2) 진단: 진단 기준 상세 서술임.\n3) 인지기능 점수: 구체적 점수 범위 및 검사명 포함임.\n4) 바이오마커 기준: 수치 포함 상세 기준임.\n5) 이후 모든 포함기준 번호 목록으로 빠짐없이 기재...",
-  "exclusion": "1) 제외기준 항목: 수치 포함 구체적 기준임.\n2) 이후 모든 제외기준 번호 목록으로 빠짐없이 기재...",
-  "studyPeriod": "○ 등록 기간: YYYY.MM.DD ~ YYYY.MM.DD임.\n○ 추적관찰 기간(중앙값): N주(N개월)임.\n○ 자료수집완료일: YYYY.MM.DD (데이터베이스 잠금일 포함)임.",
-  "studyDesign": "- **연구 형태**: 다국가·다기관·무작위배정·이중맹검·위약대조·평행군 제N상 임상시험임.\n- **배정 비율**: 시험군:대조군 = N:N으로 무작위 배정됨.\n- **층화 요인**: 층화 기준 항목 및 수준 상세 기재(~으로 층화됨.)\n- **눈가림**: 눈가림 방법 및 수준 기재(~이중맹검으로 수행됨.)",
-  "intervention": "- **투여 약제**: 약제명 전체(~을 투여함.)\n- **용량 및 용법**: 구체적 용량(mg/kg 등) 및 투여 스케줄(~에 N mg을 투여함.)\n- **투여 경로·주기**: 경로 및 투여 간격(~로 N주마다 투여함.)\n- **투여 기간**: 총 투여 기간 및 특이사항(~주간 투여됨.)\n- **치료 전환 기준**: 해당 시 전환 기준 기재(~기준 충족 시 위약으로 전환됨.)",
-  "control": "- **투여 약제**: 대조군 약제명 및 특성(~을 투여함.)\n- **용량 및 용법**: 구체적 용량 및 스케줄(~을 투여함.)\n- **투여 경로·주기**: 경로 및 투여 간격(~로 N주마다 투여함.)\n- **투여 기간**: 총 투여 기간(~주간 투여됨.)",
-  "statisticalMethods": "- **1차 분석 방법**: 분석 방법명 및 적용 대상 상세 기재(~을 사용하여 분석함.)\n- **공분산 구조**: 공분산 모형 및 고정효과 구성 기재(~을 포함함.)\n- **다중성 보정**: 다중비교 보정 방법(Hochberg, Bonferroni 등) 기재(~방법을 적용함.)\n- **결측치 처리**: 결측치 처리 방법 기재(~방식으로 처리함.)\n- **표본수 산출**: 검정력 N%, 유의수준 α=N.NN, 예상 탈락률 N% 기준으로 N명 산출됨.\n- **민감도 분석 방법**: 적용된 민감도 분석 방법명과 목적 기재(~을 실시함.)",
-  "primaryEndpoint": "- **1차 평가변수명**: 변수 정의 및 측정 도구(~로 정의됨.)\n- **평가 시점**: 기저치 대비 N주 차에 평가됨.\n- **분석 집단**: 분석 대상 집단 기재(~집단에서 평가됨.)\n- **측정 척도 범위**: 점수 범위 및 방향성 기재(범위 N~N, 점수가 낮을수록 ~을 의미함.)",
-  "secondaryEndpoints": "1) 2차 평가변수명: 정의, 측정 시점, 임상적 의미 상세 기재(~로 정의됨.)\n2) 3차 평가변수명: 상세 기재(~로 정의됨.)\n3) 탐색적 평가변수: 바이오마커 등 포함 기재(~로 정의됨.)\n4) 안전성 평가변수: ARIA, IRR 등 정의(~로 정의됨.)",
-  "patientCharacteristics": "- **무작위배정 인원**: 시험군 N명, 대조군 N명으로 배정됨.\n- **평균 연령**: 시험군 N±N세, 대조군 N±N세로 양군이 균형 있게 분포됨.\n- **성별**: 여성 N명(N%), 남성 N명(N%)으로 분포됨.\n- **인종 구성**: 주요 인종 비율 기재(백인 N% 등)로 구성됨.\n- **주요 유전자/바이오마커**: APOE ε4 등 비율 시험군·대조군 비교 기재(시험군 N% vs 대조군 N%)임.\n- **기저 인지·기능 점수**: iADRS, CDR-SB, MMSE 등 기저치 양군 비교(시험군 N점 vs 대조군 N점)임.\n- **질환 중증도/병기**: 분류 기준 및 양군 분포 기재(~분류 기준 적용, 시험군 N% vs 대조군 N%)임.",
-  "dropout": "- **스크리닝 대상**: 총 N명이 스크리닝에 참여함.\n- **스크리닝 탈락**: N명이 요건 미달로 제외됨 (주요 이유: 기준A N명, 기준B N명, 기준C N명 등)임.\n- **최종 무작위배정**: N명(시험군 N명, 대조군 N명)이 배정됨.\n- **시험군 중도탈락**: N명(N%)이 중도탈락, 주요 사유: 동의 철회 N명, 이상반응 N명, 사망 N명, 기타 N명임.\n- **대조군 중도탈락**: N명(N%)이 중도탈락, 주요 사유: 동의 철회 N명, 이상반응 N명, 사망 N명, 기타 N명임.\n- **최종 분석 완료**: 시험군 N명, 대조군 N명(총 N명, N%)이 시험을 완료하고 분석에 포함됨.",
-  "results": "○ 유효성 결과\n\n[1차 평가변수]\n- **주요 서브그룹 1 (예: 저/중 타우군)**: 시험군 LSM변화량 N.NN (95% CI, N.NN~N.NN) vs 대조군 N.NN (95% CI, N.NN~N.NN), 군간 차이 N.NN (95% CI, N.NN~N.NN, **p<.001**)로 시험군이 임상적 진행을 **N.N%** 유의하게 지연시킴.\n- **주요 서브그룹 2 (예: 전체 타우군)**: 시험군 N.NN vs 대조군 N.NN, 군간 차이 N.NN (**p<.001**)로 **N.N%** 지연 효과가 확인됨.\n\n[2차 평가변수]\n- **변수명 (서브그룹1)**: 시험군 N.NN (95% CI) vs 대조군 N.NN (95% CI), 차이 N.NN (**p<.001**)로 N.N% 지연됨.\n- **변수명 (서브그룹2)**: 시험군 vs 대조군 수치 기재(**p<.001**)임.\n- **바이오마커 결과**: 아밀로이드/타우 제거율, PET 변화 등 수치 기재(시험군 N.N% vs 대조군 N.N%, **p<.001**)임.\n\n○ 안전성 결과\n- **ARIA-E (부종)**: 시험군 N명(N.N%, 유증상 N명) vs 대조군 N명(N.N%, 유증상 N명) 발생으로 시험군에서 높게 나타남.\n- **ARIA-H (미세출혈)**: 시험군 N명(N.N%) vs 대조군 N명(N.N%) 발생으로 시험군에서 높게 나타남.\n- **주입 관련 반응(IRR)**: 시험군 N명(N.N%) vs 대조군 N명(N.N%) 발생함.\n- **치료 관련 사망**: 시험군 N명(N.N%) vs 대조군 N명(N.N%) 보고됨.\n- **중대한 이상반응**: 시험군 N명(N.N%) vs 대조군 N명(N.N%)에서 발생함.",
-  "conclusion": "- **[임상적 효능 입증]**: 1차·2차 평가변수에서 유의한 임상적 진행 지연 효과가 확인된 결론(~인 것으로 입증됨.)\n- **[바이오마커/기전 입증]**: 바이오마커 결과에 기반한 기전적 효과(~으로 입증됨.)\n- **[위험-이익 프로파일]**: 임상적 혜택과 이상반응 프로파일의 균형 평가(~이 필요한 것으로 입증됨.)",
-  "limitations": "- **[한계 1]**: 구체적 한계 내용(~이 한계임.)\n- **[한계 2]**: 구체적 한계 내용(~이 한계임.)\n- **[한계 3]**: 구체적 한계 내용(~이 한계임.)",
-  "sponsor": "- **[후원]**: 후원 기관명(한글+영문) 및 역할(설계·수행·데이터 수집·분석 전반)(~에서 전액 후원함.)",
-  "sensitivityAnalysis": "- **[분석방법명 1]**: 분석 방법 및 결과 수치(~결과가 확인됨.)\n- **[분석방법명 2]**: 분석 방법 및 결과 수치(~로 강건성이 검증됨.)\n- **[ARIA/이상반응 검열 분석]**: 이상반응 발생 후 데이터 검열한 민감도 분석 결과(~범위의 일관된 효과가 확인됨.)",
-  "researcherPerspective": "- **[정밀 의료 관점]**: 바이오마커·유전자 층화에 기반한 맞춤 치료 가치 서술(~의 가능성을 제시함.)\n- **[국내 임상 적용 관점]**: 한국 임상 환경에서의 적용 가치 및 고려사항(~이 필요함.)\n- **[모니터링 체계 관점]**: 부작용 조기 감지를 위한 MRI 등 모니터링 체계 구축 필요성(~이 구축되어야 함.)"
+  "title": "논문 영문 제목 전체 (괄호 안에 한글 번역 병기)",
+  "citation": "저자명 전체(최소 3인). 저널명. 연도;권(호):페이지. doi:...",
+  "countries": "참여 국가명 전체 목록 (총 N개국)",
+  "authors": "제1저자, 제2저자, ... et al. / 소속기관명",
+  "affiliation": "교신저자명, 소속기관 전체명 (영문 + 한글)",
+  "objective": "- **연구 배경**: 이 연구가 필요한 임상적 배경과 문제 제기(~함.)\n- **주요 목적**: 이 연구의 핵심 목적(~평가하고자 함.)\n- **세부 목적**: 추가 분석 목적이 있으면 기재(~분석하고자 함.)",
+  "inclusion": "논문 본문·부록·Methods에서 모든 포함기준 추출.\n1) 연령: 구체적 연령 범위(예: 만 60세 이상 85세 이하)임.\n2) 진단: 진단명 및 진단 기준(예: MMSE 점수 범위, PET 기준 등)임.\n(이후 논문에서 찾은 모든 기준을 번호 목록으로 기재. 수치 포함 필수)",
+  "exclusion": "논문 본문·부록·Methods에서 모든 제외기준 추출.\n1) 첫 번째 제외기준: 구체적 내용 및 수치임.\n(이후 논문에서 찾은 모든 기준을 번호 목록으로 기재)",
+  "studyPeriod": "○ 등록 기간: 논문에 명시된 날짜 또는 연도·월임.\n○ 추적관찰 기간: 논문에 명시된 기간(중앙값 N주 또는 N개월)임.\n○ 자료수집완료일: 논문에 명시된 날짜임.",
+  "studyDesign": "- **연구 형태**: 상세 설계 특성 전부 기재(다국가·다기관·무작위배정·이중맹검 등)임.\n- **배정 방법·비율**: 무작위배정 방법 및 군별 비율임.\n- **층화 기준**: 층화에 사용된 요인 전부 기재(~으로 층화됨.)\n- **눈가림**: 눈가림 수준 및 방법(~으로 수행됨.)",
+  "intervention": "- **약제명**: 정식 약제명 및 계열(~임.)\n- **용량·용법**: 구체적 mg, mg/kg, 또는 단위별 용량 및 투여 스케줄(~에 N mg 투여됨.)\n- **투여 경로·주기**: 정맥/피하/경구 등 경로 및 투여 간격(~주마다 투여됨.)\n- **투여 기간**: 총 투여 기간(~주 또는 ~개월간 투여됨.)\n- **용량 조정·전환 기준**: 해당 시 기재(~기준 충족 시 전환됨.)",
+  "control": "- **대조군 약제**: 위약 또는 활성 대조약 명칭(~임.)\n- **용량·용법**: 구체적 용량 및 스케줄(~에 투여됨.)\n- **투여 경로·주기**: 경로 및 간격(~주마다 투여됨.)\n- **투여 기간**: 총 기간(~주간 투여됨.)",
+  "statisticalMethods": "논문 Statistical Analysis 섹션을 완전히 번역하여 기재.\n- **1차 분석 방법**: 구체적 통계 방법명(MMRM, Bayesian 등) 및 적용 대상(~을 사용하여 분석함.)\n- **가설 검정 방법**: 단측/양측 검정, 유의수준 α 기재(~로 설정됨.)\n- **다중성 보정**: 보정 방법명 기재(~방법 적용됨.)\n- **결측치 처리**: 방법 기재(~방식으로 처리됨.)\n- **표본수 산출**: 검정력·유의수준·탈락률 기준 산출 근거 및 최종 표본수(N명으로 산출됨.)\n- **민감도 분석**: 방법명 및 목적 기재(~분석 실시됨.)",
+  "primaryEndpoint": "- **1차 평가변수**: 변수명 및 완전한 정의(~으로 정의됨.)\n- **측정 도구·척도**: 척도명, 점수 범위, 점수 방향성(범위 N~N, 점수가 낮을수록 ~을 의미함.)\n- **평가 시점**: 기저치 대비 N주·N개월 차에 평가됨.\n- **분석 집단**: 해당 평가변수의 분석 대상 집단(~집단에서 평가됨.)",
+  "secondaryEndpoints": "논문에 명시된 모든 2차·3차·탐색적 평가변수를 번호 목록으로 기재.\n1) 변수명: 정의, 측정 도구, 평가 시점, 임상적 의미(~로 정의됨.)\n2) 변수명: 상세 기재(~로 정의됨.)\n(이후 논문에서 찾은 모든 2차 평가변수 기재)",
+  "patientCharacteristics": "모든 군의 기저 특성을 군별로 비교하여 기재.\n- **총 무작위배정 인원**: N명(시험군 N명, 대조군 N명)으로 배정됨.\n- **연령**: 시험군 평균/중앙값 N세, 대조군 N세로 균형 있게 배정됨.\n- **성별**: 여성 N명(N%), 남성 N명(N%)으로 분포됨.\n- **인종·민족**: 주요 인종 구성(백인 N%, 아시아인 N% 등)임.\n- **유전자형·바이오마커**: APOE ε4 등 비율(시험군 N% vs 대조군 N%)임.\n- **기저 평가척도 점수**: 주요 척도 기저치 양군 비교(시험군 N점 vs 대조군 N점)임.\n- **질환 중증도**: 병기·분류 기준 및 양군 분포(시험군 N% vs 대조군 N%)임.",
+  "dropout": "CONSORT 흐름에 따라 단계별로 기재.\n- **스크리닝 참여**: 총 N명 스크리닝 참여함.\n- **스크리닝 탈락**: N명 제외 (이유별: 기준A N명, 기준B N명 등)임.\n- **최종 무작위배정**: N명(시험군 N명, 대조군 N명)이 배정됨.\n- **시험군 중도탈락**: N명(N%) 탈락, 주요 사유: 동의 철회 N명, 이상반응 N명, 사망 N명, 기타 N명임.\n- **대조군 중도탈락**: N명(N%) 탈락, 주요 사유 기재임.\n- **최종 분석 포함**: 시험군 N명, 대조군 N명(총 N명, N%)이 최종 분석에 포함됨.",
+  "results": "○ 유효성 결과\n[1차 평가변수 — 모든 서브그룹 결과 기재]\n- **[서브그룹명]**: 시험군 N.NN (95% CI N.NN~N.NN) vs 대조군 N.NN (95% CI N.NN~N.NN), 군간 차이 N.NN (95% CI N.NN~N.NN, **p=N.NNN**)로 **N.N%** 지연 효과 확인됨.\n(이후 모든 서브그룹 결과 기재)\n\n[2차 평가변수 — 논문에 명시된 모든 결과 기재]\n- **[변수명]**: 시험군 N.NN vs 대조군 N.NN (**p=N.NNN**)임.\n(이후 모든 2차 평가변수 결과 기재)\n\n[바이오마커·영상 결과 — 해당 시 기재]\n- **[바이오마커명]**: 시험군 N.N% vs 대조군 N.N% (**p<.001**)임.\n\n○ 안전성 결과\n논문 Safety 섹션을 완전히 번역하여 주요 이상반응을 모두 기재.\n- **[이상반응명]**: 시험군 N명(N.N%) vs 대조군 N명(N.N%)에서 발생함.\n(중대한 이상반응, ARIA, IRR, 사망 포함 모두 기재)",
+  "conclusion": "- **[주요 결론]**: 저자의 핵심 결론을 완전히 번역(~인 것으로 입증됨.)\n- **[임상적 의의]**: 이 결과의 임상적 함의(~으로 확인됨.)\n- **[향후 방향]**: 저자가 언급한 향후 연구 방향이나 임상 적용(~이 필요함.)",
+  "limitations": "저자가 논문 Limitations·Discussion 섹션에서 언급한 모든 한계를 번역.\n- **[한계명]**: 구체적 한계 내용(~이 한계임.)",
+  "sponsor": "- **후원기관**: 후원 기관명(영문+한글 번역) 및 후원 범위·역할(~에서 후원함.)",
+  "sensitivityAnalysis": "논문에서 실시한 모든 민감도 분석 결과를 번역.\n- **[분석명]**: 분석 방법, 목적, 결과 수치(~로 강건성 검증됨.)",
+  "researcherPerspective": "저자의 Discussion·Conclusion에서 강조한 임상적 관점 및 의의를 번역.\n- **[관점명]**: 구체적 내용 및 임상적 시사점(~임.)",
+  "keyTables": [
+    {
+      "title": "논문에 있는 Table 번호 및 제목 (예: Table 1. Baseline Characteristics)",
+      "headers": ["항목", "시험군 (n=XXX)", "대조군 (n=XXX)"],
+      "rows": [["연령 평균±SD (세)", "XX.X±X.X", "XX.X±X.X"], ["여성, n (%)", "XXX (XX.X%)", "XXX (XX.X%)"]],
+      "footnote": "필요 시 각주 기재"
+    }
+  ],
+  "keyFigures": [
+    {
+      "label": "Figure 1",
+      "title": "그림 제목 (예: Kaplan-Meier Estimates of Progression-Free Survival)",
+      "description": "그림 내용 상세 설명: X축·Y축 의미, 두 군 곡선 특성, 주요 관찰 시점 데이터 서술함.",
+      "keyFindings": "핵심 수치: 주요 시점 생존율, HR, 95% CI, p값 등 완전한 통계 수치 기재됨."
+    }
+  ]
 }`;
 
     try {
-      // ── 모델 폴백 체인 + 자동 재시도 ───────────────────────────────
-      // gemini-2.5-flash 과부하 시 → gemini-2.5-flash-lite → gemini-1.5-flash 순으로 자동 전환
-      const MODEL_CHAIN = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite-preview-06-17",
-        "gemini-1.5-flash",
-      ];
-      const MAX_RETRIES = 2; // 각 모델당 최대 재시도 횟수
-      const RETRY_DELAY = (attempt: number) => 2000 + attempt * 1500; // 2s, 3.5s
-
-      const buildUrl = (model: string) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
-
-      const requestBody = JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 8192,
-          responseMimeType: "application/json",
-        },
-      });
-
+      // ── OpenAI / Gemini 자동 선택 + 모델 폴백 + 재시도 ────────────
       let response: Response | null = null;
       let lastError = "";
+      const MAX_RETRIES = 2;
+      const RETRY_DELAY = (n: number) => 2000 + n * 1500;
 
-      outer: for (const model of MODEL_CHAIN) {
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-          if (attempt > 0) {
-            const delay = RETRY_DELAY(attempt);
-            setLoadingStep(`과부하 감지 — ${delay / 1000}초 후 재시도 중... (${model})`);
-            await new Promise(r => setTimeout(r, delay));
-          } else if (model !== MODEL_CHAIN[0]) {
-            setLoadingStep(`모델 전환 중: ${model} 사용...`);
+      if (useOpenAI) {
+        // ── OpenAI GPT 호출 ──────────────────────────────────────────
+        const OPENAI_MODELS = ["gpt-5.5", "gpt-4o"];
+
+        const openaiBody = JSON.stringify({
+          model: "gpt-5.5", // 아래 루프에서 교체됨
+          stream: true,
+          temperature: 0.1,
+          max_tokens: 8192,
+          response_format: { type: "json_object" }, // JSON 강제 출력
+          messages: [
+            { role: "system", content: SYSTEM_INSTRUCTION },
+            { role: "user",   content: userPrompt },
+          ],
+        });
+
+        outer: for (const model of OPENAI_MODELS) {
+          for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+              const delay = RETRY_DELAY(attempt);
+              setLoadingStep(`과부하 감지 — ${delay / 1000}초 후 재시도... (${model})`);
+              await new Promise(r => setTimeout(r, delay));
+            } else if (model !== OPENAI_MODELS[0]) {
+              setLoadingStep(`모델 전환 중: ${model}...`);
+            }
+
+            const body = JSON.stringify({
+              ...JSON.parse(openaiBody),
+              model,
+            });
+
+            const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${openaiKey}`,
+              },
+              body,
+            });
+
+            if (resp.status === 401 || resp.status === 403) {
+              const e = await resp.json().catch(() => ({}));
+              throw new Error(`OpenAI API 키 오류: ${e?.error?.message || resp.status}\nVercel 환경변수 VITE_OPENAI_API_KEY를 확인해 주세요.`);
+            }
+            if (resp.status === 429 || resp.status === 503) {
+              const e = await resp.json().catch(() => ({}));
+              lastError = e?.error?.message || `과부하 (${resp.status})`;
+              continue;
+            }
+            if (!resp.ok) {
+              const e = await resp.json().catch(() => ({}));
+              lastError = e?.error?.message || `오류 ${resp.status}`;
+              break; // 다음 모델로
+            }
+            response = resp;
+            break outer;
           }
+        }
+      } else {
+        // ── Gemini 호출 ─────────────────────────────────────────────
+        const GEMINI_MODELS = [
+          "gemini-2.5-flash",
+          "gemini-1.5-flash",
+        ];
+        const buildGeminiUrl = (m: string) =>
+          `https://generativelanguage.googleapis.com/v1beta/models/${m}:streamGenerateContent?key=${geminiKey}&alt=sse`;
 
-          const resp = await fetch(buildUrl(model), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: requestBody,
-          });
+        const geminiBody = JSON.stringify({
+          system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 8192, responseMimeType: "application/json" },
+        });
 
-          // 영구 오류(키 오류 등)는 즉시 중단
-          if (resp.status === 400 || resp.status === 403) {
-            const errJson = await resp.json().catch(() => ({}));
-            const msg = errJson?.error?.message || `Gemini API 오류 (${resp.status})`;
-            throw new Error(`API 키 오류: ${msg}\nVercel 환경변수 VITE_GEMINI_API_KEY 값을 확인해 주세요.`);
+        outer: for (const model of GEMINI_MODELS) {
+          for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+              const delay = RETRY_DELAY(attempt);
+              setLoadingStep(`과부하 감지 — ${delay / 1000}초 후 재시도... (${model})`);
+              await new Promise(r => setTimeout(r, delay));
+            } else if (model !== GEMINI_MODELS[0]) {
+              setLoadingStep(`모델 전환 중: ${model}...`);
+            }
+
+            const resp = await fetch(buildGeminiUrl(model), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: geminiBody,
+            });
+
+            if (resp.status === 400 || resp.status === 403) {
+              const e = await resp.json().catch(() => ({}));
+              throw new Error(`Gemini API 키 오류: ${e?.error?.message || resp.status}\nVercel 환경변수 VITE_GEMINI_API_KEY를 확인해 주세요.`);
+            }
+            if (resp.status === 429 || resp.status === 503) {
+              const e = await resp.json().catch(() => ({}));
+              lastError = e?.error?.message || `과부하 (${resp.status})`;
+              continue;
+            }
+            if (resp.status === 404) { lastError = `모델 미지원: ${model}`; break; }
+            if (!resp.ok) {
+              const e = await resp.json().catch(() => ({}));
+              lastError = e?.error?.message || `오류 ${resp.status}`;
+              continue;
+            }
+            response = resp;
+            break outer;
           }
-
-          // 일시적 과부하(429, 503) → 재시도
-          if (resp.status === 429 || resp.status === 503) {
-            const errJson = await resp.json().catch(() => ({}));
-            lastError = errJson?.error?.message || `서버 과부하 (${resp.status})`;
-            continue; // 같은 모델 재시도
-          }
-
-          // 모델 없음(404) → 다음 모델로
-          if (resp.status === 404) {
-            lastError = `모델 미지원: ${model}`;
-            break; // 다음 모델로 이동
-          }
-
-          if (!resp.ok) {
-            const errJson = await resp.json().catch(() => ({}));
-            lastError = errJson?.error?.message || `오류 ${resp.status}`;
-            continue;
-          }
-
-          response = resp;
-          break outer; // 성공
         }
       }
 
@@ -258,7 +328,12 @@ ${text.slice(0, 8000)}
           if (!raw || raw === "[DONE]") continue;
           try {
             const parsed = JSON.parse(raw);
-            const chunk = parsed?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+            // OpenAI 형식: choices[0].delta.content
+            // Gemini 형식: candidates[0].content.parts[0].text
+            const chunk =
+              parsed?.choices?.[0]?.delta?.content ??
+              parsed?.candidates?.[0]?.content?.parts?.[0]?.text ??
+              "";
             if (chunk) {
               accumulated += chunk;
               charCount += chunk.length;
