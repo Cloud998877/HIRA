@@ -1,0 +1,6 @@
+{
+  "name": "심평원 임상문헌 요약표 생성기",
+  "description": "임상시험 문헌 내용을 심평원 제출 서식(표6) 양식에 맞춰 완벽하게 한국어로 구조화하는 AI 분석 도구입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
