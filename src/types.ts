@@ -9,6 +9,7 @@ export interface LiteratureSummary {
   exclusion: string;
   studyPeriod: string;
   studyDesign: string;
+  statisticalMethods: string;
   intervention: string;
   control: string;
   primaryEndpoint: string;

@@ -236,6 +236,10 @@ export default function SummaryTable({
               <td style="padding: 10px 12px; border: 1px solid #CBD5E0;">${markdownToHtml(summary.studyDesign)}</td>
             </tr>
             <tr>
+              <th style="background-color: #EBF8FF; color: #2B6CB0; font-weight: bold; padding: 10px 12px; font-size: 11px; width: 150px; border: 1px solid #CBD5E0; text-align: left;">통계분석방법</th>
+              <td style="padding: 10px 12px; border: 1px solid #CBD5E0;">${markdownToHtml(summary.statisticalMethods || "해당 정보 없음")}</td>
+            </tr>
+            <tr>
               <th style="background-color: #EBF8FF; color: #2B6CB0; font-weight: bold; padding: 10px 12px; font-size: 11px; width: 150px; border: 1px solid #CBD5E0; text-align: left;">중재형태</th>
               <td style="padding: 10px 12px; border: 1px solid #CBD5E0;">
                 <b>○ 시험군 (Intervention group):</b><br/>
@@ -668,6 +672,14 @@ export default function SummaryTable({
                   </th>
                   <td className="p-3 border border-slate-300 text-slate-800 text-[13px] leading-relaxed">
                     {renderLines(summary.studyDesign)}
+                  </td>
+                </tr>
+                <tr>
+                  <th className="bg-blue-50 text-blue-800 font-bold p-3 border border-slate-300 w-[170px] text-left align-top text-xs tracking-wider">
+                    통계분석방법
+                  </th>
+                  <td className="p-3 border border-slate-300 text-slate-700 text-[13px] leading-relaxed">
+                    {renderLines(summary.statisticalMethods || "해당 정보 없음")}
                   </td>
                 </tr>
                 <tr>
