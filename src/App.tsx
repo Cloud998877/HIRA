@@ -76,33 +76,100 @@ export default function App() {
       return;
     }
 
+    // VITE_GEMINI_API_KEY: Vercel 환경변수에서 가져옴 (브라우저 직접 호출 — 서버 타임아웃 없음)
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY as string;
+    if (!apiKey) {
+      setErrorMessage(
+        "API 키가 설정되지 않았습니다.\n" +
+        "Vercel 프로젝트 설정 > Environment Variables 에서\n" +
+        "VITE_GEMINI_API_KEY = (발급받은 Gemini API 키) 를 추가하고 재배포해 주세요."
+      );
+      return;
+    }
+
     setLoading(true);
     setErrorMessage(null);
-    setLoadingStep("AI와 연결 중...");
+    setLoadingStep("Gemini AI와 연결 중...");
+
+    const SYSTEM_INSTRUCTION = `당신은 대한민국 건강보험심사평가원(심평원) 제출용 임상시험 문헌 요약표(표6) 전문 작성가입니다.
+
+[필수 작성 원칙]
+1. 모든 문장 어미는 반드시 "~임.", "~함.", "~확인됨.", "~나타남." 등 명사형 격식체로 끝낼 것
+2. 통계 수치(HR, 95% CI, p-value, OR)는 절대 생략 없이 완전한 세트로 기재
+3. 포함·제외 기준은 번호 목록으로 수치 포함하여 전부 기재
+4. 안전성: 본문에서 강조된 주요 이상반응 5~7개만 시험군·대조군 비교 서술
+5. 핵심 통계치는 **볼드** 처리
+6. 줄글 금지 — 모든 항목은 "- 항목: 내용(~임)." 리스트 형식
+7. 번역투 금지`;
+
+    const userPrompt = `다음 임상문헌을 분석하여 심평원 표6 서식에 맞게 아래 JSON 형식으로 작성하세요.
+코드블록(\`\`\`) 없이 순수 JSON만 반환하세요.
+
+[기본정보] 연번: ${seq} / 문헌구분: ${type} / 추가요청: ${extra || "없음"}
+
+[논문내용]
+${text.slice(0, 7000)}
+
+아래 JSON 키를 모두 채워서 반환:
+{
+  "title": "영문 제목 (한글 번역 병기)",
+  "citation": "저자명 et al. 저널명. 연도;권(호):페이지",
+  "countries": "참여 국가 목록 (쉼표 구분)",
+  "authors": "주저자 et al.",
+  "affiliation": "교신저자 소속기관 (영문+한글)",
+  "objective": "연구 목적 (~함. 종결 리스트)",
+  "inclusion": "1) 포함기준 항목: 수치 포함 내용임.\\n2) ...",
+  "exclusion": "1) 제외기준 항목: 수치 포함 내용임.\\n2) ...",
+  "studyPeriod": "○ 등록 기간: YYYY.MM~YYYY.MM임.\\n○ 추적관찰 기간(중앙값): N개월임.\\n○ 자료수집완료일: YYYY.MM.DD임.",
+  "studyDesign": "- 설계 특성: 내용임.\\n- 무작위배정 방법: 내용임.\\n- 층화 기준: 내용임.",
+  "intervention": "- 시험군 약물: 용량·경로·주기 포함 상세 내용임.",
+  "control": "- 대조군 약물: 용량·경로·주기 포함 상세 내용임.",
+  "primaryEndpoint": "- 1차 평가변수: 정의 및 측정방법 (~으로 정의됨.)",
+  "secondaryEndpoints": "1) 2차 평가변수명: 정의 및 목적임.\\n2) ...",
+  "patientCharacteristics": "- **중위 연령**: 시험군 N세, 대조군 N세로 균형 있게 배정됨.\\n- **성별 분포**: ...임.\\n- **ECOG 점수**: ...임.",
+  "dropout": "- **등록 및 배정**: 총 N명 스크리닝 중 N명 무작위배정됨.\\n- **시험군 탈락**: N명 중도탈락, 주요 사유: ...임.\\n- **대조군 탈락**: ...임.",
+  "results": "○ 유효성 결과\\n- **1차 평가변수**: 시험군 N% vs 대조군 N% (**OR/HR N.NN, 95% CI N.NN~N.NN, p=N.NNNN**)임.\\n\\n○ 안전성 결과\\n- **가장 흔한 3등급 이상**: 시험군 N% vs 대조군 N%임.",
+  "conclusion": "- **주요 결론**: ...인 것으로 확인됨.",
+  "limitations": "- **한계 1**: ...이 한계임.",
+  "sponsor": "- **후원**: ...에서 후원함.",
+  "sensitivityAnalysis": "해당 정보 없음",
+  "researcherPerspective": "해당 정보 없음"
+}`;
 
     try {
-      // 스트리밍 fetch — 서버가 토큰을 실시간으로 보내주므로 타임아웃 없음
-      const response = await fetch("/api/summarize", {
+      // 브라우저에서 Gemini 스트리밍 API 직접 호출 (타임아웃 없음)
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
+
+      const response = await fetch(geminiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ seq, type, text, extra }),
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          generationConfig: {
+            temperature: 0.15,
+            maxOutputTokens: 8192,
+          },
+        }),
       });
 
-      // 초기 연결 오류 처리 (스트림 시작 전 에러)
       if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error || `서버 오류 (코드: ${response.status})`);
+        const errJson = await response.json().catch(() => ({}));
+        const msg = errJson?.error?.message || `Gemini API 오류 (${response.status})`;
+        if (response.status === 400 || response.status === 403) {
+          throw new Error(`API 키 오류: ${msg}\nVercel 환경변수 VITE_GEMINI_API_KEY 값을 확인해 주세요.`);
+        }
+        throw new Error(msg);
       }
 
       if (!response.body) throw new Error("스트리밍 응답을 받지 못했습니다.");
 
-      // SSE 스트림 읽기
+      // SSE 스트림을 읽으면서 텍스트 누적
       const reader = response.body.getReader();
       const dec = new TextDecoder();
       let accumulated = "";
       let buf = "";
       let charCount = 0;
-
       const steps = [
         "영문 의학 문헌 해독 중...",
         "포함·제외 기준 추출 중...",
@@ -125,42 +192,32 @@ export default function App() {
           const raw = line.slice(6).trim();
           if (!raw || raw === "[DONE]") continue;
           try {
-            const chunk = JSON.parse(raw);
-            if (chunk.t) {
-              accumulated += chunk.t;
-              charCount += chunk.t.length;
-              // 진행 단계 업데이트
-              if (charCount > stepIdx * 400 && stepIdx < steps.length) {
-                setLoadingStep(steps[stepIdx]);
-                stepIdx++;
+            const parsed = JSON.parse(raw);
+            const chunk = parsed?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+            if (chunk) {
+              accumulated += chunk;
+              charCount += chunk.length;
+              if (charCount > stepIdx * 500 && stepIdx < steps.length) {
+                setLoadingStep(steps[stepIdx++]);
               }
             }
-            // 오류 청크 처리
-            if (chunk.error) throw new Error(chunk.error);
-          } catch (parseErr: any) {
-            if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
-          }
+          } catch { /* 불완전 청크 무시 */ }
         }
       }
 
       if (!accumulated.trim()) throw new Error("AI 응답이 비어있습니다. 잠시 후 다시 시도해 주세요.");
 
-      // JSON 파싱: ```json 블록 제거 후 파싱
-      const cleaned = accumulated
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/```\s*$/i, "")
-        .trim();
+      // JSON 블록 추출 및 파싱
+      let jsonStr = accumulated.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
+      const s = jsonStr.indexOf("{");
+      const e = jsonStr.lastIndexOf("}");
+      if (s !== -1 && e !== -1) jsonStr = jsonStr.slice(s, e + 1);
 
       let summaryResult: LiteratureSummary;
       try {
-        summaryResult = JSON.parse(cleaned);
+        summaryResult = JSON.parse(jsonStr);
       } catch {
-        // JSON 추출 실패 시 { } 블록 찾기
-        const start = cleaned.indexOf("{");
-        const end = cleaned.lastIndexOf("}");
-        if (start === -1 || end === -1) throw new Error("AI 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.");
-        summaryResult = JSON.parse(cleaned.slice(start, end + 1));
+        throw new Error("AI 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.");
       }
 
       setCurrentSummary(summaryResult);
@@ -190,7 +247,7 @@ export default function App() {
     }
   };
 
-  const handleDownloadHTML = () => {
+    const handleDownloadHTML = () => {
     if (!currentSummary) return;
     
     const tableHtml = document.getElementById("hira-submission-table")?.outerHTML || "";
