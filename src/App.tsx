@@ -347,7 +347,7 @@ ${text.slice(0, 28000)}
 
       if (!accumulated.trim()) throw new Error("AI 응답이 비어있습니다. 잠시 후 다시 시도해 주세요.");
 
-      // ── JSON 복구 파이프라인 ──────────────────────────────────────
+      // ── JSON 복구 파이프라인 (문자 단위 상태 머신) ────────────────
       const repairJSON = (raw: string): string => {
         // 1) 마크다운 코드블록 제거
         let s = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/gi, "").trim();
@@ -355,35 +355,96 @@ ${text.slice(0, 28000)}
         const start = s.indexOf("{");
         const end   = s.lastIndexOf("}");
         if (start !== -1 && end !== -1) s = s.slice(start, end + 1);
-        // 3) JSON 문자열 값 내부의 제어문자 이스케이프 (가장 흔한 파싱 오류 원인)
-        //    문자열 값 안에서만 실제 줄바꿈/탭을 \\n/\\t 로 변환
-        s = s.replace(/"((?:[^"\\]|\\.)*)"/g, (_match: string, inner: string) => {
-          const fixed = inner
-            .replace(/\r\n/g, "\\n")
-            .replace(/\r/g,   "\\n")
-            .replace(/\n/g,   "\\n")
-            .replace(/\t/g,   "\\t");
-          return `"${fixed}"`;
-        });
-        // 4) 후행 콤마 제거
-        s = s.replace(/,(\s*[}\]])/g, "$1");
-        return s;
+
+        // 3) 문자 단위 상태 머신: 문자열 내부의 제어문자를 정확히 이스케이프
+        //    정규식보다 훨씬 정확함 (중첩 따옴표, 부분 이스케이프 처리)
+        let result = "";
+        let inString = false;
+        let escaped = false;
+
+        for (let i = 0; i < s.length; i++) {
+          const ch = s[i];
+
+          if (escaped) {
+            // 이전 문자가 백슬래시였으면 그대로 출력
+            result += ch;
+            escaped = false;
+            continue;
+          }
+
+          if (ch === "\\") {
+            escaped = true;
+            result += ch;
+            continue;
+          }
+
+          if (ch === '"') {
+            inString = !inString;
+            result += ch;
+            continue;
+          }
+
+          if (inString) {
+            // 문자열 내부에서 허용되지 않는 제어문자를 이스케이프
+            if (ch === "\n")      { result += "\\n";  continue; }
+            if (ch === "\r")      { result += "\\r";  continue; }
+            if (ch === "\t")      { result += "\\t";  continue; }
+            if (ch === "\x08")    { result += "\\b";  continue; }
+            if (ch === "\x0C")    { result += "\\f";  continue; }
+            // 기타 제어문자 (ASCII 0-31)
+            if (ch.charCodeAt(0) < 32) {
+              result += `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
+              continue;
+            }
+          }
+
+          result += ch;
+        }
+
+        // 4) 닫히지 않은 문자열 처리 (말미 따옴표 누락)
+        if (inString) result += '"';
+
+        // 5) 후행 콤마 제거
+        result = result.replace(/,(\s*[}\]])/g, "$1");
+
+        return result;
       };
 
-      const jsonStr = repairJSON(accumulated);
+      let jsonStr = repairJSON(accumulated);
 
       let summaryResult: LiteratureSummary;
       try {
         summaryResult = JSON.parse(jsonStr);
       } catch (parseErr) {
-        // 복구 후에도 실패 시 — 원문 앞부분을 에러 메시지에 표시
-        const preview = accumulated.slice(0, 200).replace(/\n/g, " ");
-        throw new Error(
-          `AI 응답을 JSON으로 변환하지 못했습니다.\n\n` +
-          `원인: ${String(parseErr)}\n\n` +
-          `응답 앞부분: ${preview}\n\n` +
-          `→ 잠시 후 다시 시도하거나, 논문 텍스트를 줄여서 입력해 주세요.`
-        );
+        // 2차 복구 시도: 잘린 JSON 강제 닫기
+        try {
+          // 열린 배열/객체 카운트 후 닫기 시도
+          let opens = 0;
+          let inStr = false;
+          let esc = false;
+          for (const ch of jsonStr) {
+            if (esc) { esc = false; continue; }
+            if (ch === "\\") { esc = true; continue; }
+            if (ch === '"') { inStr = !inStr; continue; }
+            if (!inStr) {
+              if (ch === "{" || ch === "[") opens++;
+              if (ch === "}" || ch === "]") opens--;
+            }
+          }
+          // 열린 만큼 닫기
+          let closing = "";
+          if (inStr) closing += '"';  // 닫히지 않은 문자열
+          for (let i = 0; i < opens; i++) closing += "}";
+          summaryResult = JSON.parse(jsonStr + closing);
+        } catch {
+          const preview = accumulated.slice(0, 300).replace(/\n/g, " ");
+          throw new Error(
+            `AI 응답을 JSON으로 변환하지 못했습니다.\n\n` +
+            `원인: ${String(parseErr)}\n\n` +
+            `응답 앞부분: ${preview}\n\n` +
+            `→ 잠시 후 다시 시도하거나, 논문 텍스트를 줄여서 입력해 주세요.`
+          );
+        }
       }
 
       setCurrentSummary(summaryResult);
