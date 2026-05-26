@@ -148,30 +148,83 @@ ${text.slice(0, 8000)}
 }`;
 
     try {
-      // 브라우저에서 Gemini 스트리밍 API 직접 호출 (타임아웃 없음)
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
+      // ── 모델 폴백 체인 + 자동 재시도 ───────────────────────────────
+      // gemini-2.5-flash 과부하 시 → gemini-2.5-flash-lite → gemini-1.5-flash 순으로 자동 전환
+      const MODEL_CHAIN = [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite-preview-06-17",
+        "gemini-1.5-flash",
+      ];
+      const MAX_RETRIES = 2; // 각 모델당 최대 재시도 횟수
+      const RETRY_DELAY = (attempt: number) => 2000 + attempt * 1500; // 2s, 3.5s
 
-      const response = await fetch(geminiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 8192,
-            responseMimeType: "application/json", // ← JSON만 출력 강제 (마크다운 블록, 전문 텍스트 제거)
-          },
-        }),
+      const buildUrl = (model: string) =>
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
+
+      const requestBody = JSON.stringify({
+        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8192,
+          responseMimeType: "application/json",
+        },
       });
 
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        const msg = errJson?.error?.message || `Gemini API 오류 (${response.status})`;
-        if (response.status === 400 || response.status === 403) {
-          throw new Error(`API 키 오류: ${msg}\nVercel 환경변수 VITE_GEMINI_API_KEY 값을 확인해 주세요.`);
+      let response: Response | null = null;
+      let lastError = "";
+
+      outer: for (const model of MODEL_CHAIN) {
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          if (attempt > 0) {
+            const delay = RETRY_DELAY(attempt);
+            setLoadingStep(`과부하 감지 — ${delay / 1000}초 후 재시도 중... (${model})`);
+            await new Promise(r => setTimeout(r, delay));
+          } else if (model !== MODEL_CHAIN[0]) {
+            setLoadingStep(`모델 전환 중: ${model} 사용...`);
+          }
+
+          const resp = await fetch(buildUrl(model), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody,
+          });
+
+          // 영구 오류(키 오류 등)는 즉시 중단
+          if (resp.status === 400 || resp.status === 403) {
+            const errJson = await resp.json().catch(() => ({}));
+            const msg = errJson?.error?.message || `Gemini API 오류 (${resp.status})`;
+            throw new Error(`API 키 오류: ${msg}\nVercel 환경변수 VITE_GEMINI_API_KEY 값을 확인해 주세요.`);
+          }
+
+          // 일시적 과부하(429, 503) → 재시도
+          if (resp.status === 429 || resp.status === 503) {
+            const errJson = await resp.json().catch(() => ({}));
+            lastError = errJson?.error?.message || `서버 과부하 (${resp.status})`;
+            continue; // 같은 모델 재시도
+          }
+
+          // 모델 없음(404) → 다음 모델로
+          if (resp.status === 404) {
+            lastError = `모델 미지원: ${model}`;
+            break; // 다음 모델로 이동
+          }
+
+          if (!resp.ok) {
+            const errJson = await resp.json().catch(() => ({}));
+            lastError = errJson?.error?.message || `오류 ${resp.status}`;
+            continue;
+          }
+
+          response = resp;
+          break outer; // 성공
         }
-        throw new Error(msg);
+      }
+
+      if (!response) {
+        throw new Error(
+          `모든 모델에서 요청이 실패했습니다.\n마지막 오류: ${lastError}\n\n잠시 후 다시 시도해 주세요.`
+        );
       }
 
       if (!response.body) throw new Error("스트리밍 응답을 받지 못했습니다.");
