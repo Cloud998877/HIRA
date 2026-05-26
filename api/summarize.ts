@@ -2,7 +2,7 @@
  * Vercel Edge Runtime — Gemini 스트리밍 API
  * - 스트리밍: 첫 토큰부터 즉시 클라이언트로 전송 → 타임아웃 없음
  * - JSON 스키마 제거: 스키마 검증 오버헤드 제거로 응답 속도 2~3배 향상
- * - gemini-2.0-flash: 빠른 고품질 모델
+ * - gemini-2.5-flash: 최신 빠른 고품질 모델
  */
 export const runtime = "edge";
 
@@ -76,7 +76,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (!text.trim()) return Response.json({ error: "논문 내용을 입력해주세요." }, { status: 400, headers: corsHeaders });
 
   // Gemini 스트리밍 API 호출 (streamGenerateContent + alt=sse)
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
 
   let geminiResp: Response;
   try {

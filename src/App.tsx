@@ -138,7 +138,7 @@ ${text.slice(0, 7000)}
 
     try {
       // 브라우저에서 Gemini 스트리밍 API 직접 호출 (타임아웃 없음)
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
 
       const response = await fetch(geminiUrl, {
         method: "POST",
