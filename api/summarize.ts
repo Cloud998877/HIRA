@@ -1,136 +1,180 @@
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { GoogleGenAI, Type } from "@google/genai";
+/**
+ * Vercel Edge Runtime 함수
+ * - Edge Runtime: 타임아웃 없음 (Hobby 플랜 포함)
+ * - Gemini REST API 직접 호출 (SDK 불필요, fetch 사용)
+ * - gemini-2.0-flash: 빠른 응답, 구조화 출력 지원
+ */
+export const runtime = "edge";
 
-let aiClient: GoogleGenAI | null = null;
-
-function getGenAI(): GoogleGenAI {
-  if (!aiClient) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      throw new Error(
-        "GEMINI_API_KEY 환경변수가 설정되지 않았습니다. Vercel 프로젝트 설정 > Environment Variables에서 추가해 주세요."
-      );
-    }
-    aiClient = new GoogleGenAI({ apiKey: key });
-  }
-  return aiClient;
-}
-
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS 헤더 설정
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "POST 요청만 허용됩니다." });
-  }
-
-  try {
-    const { text, type, seq, extra } = req.body;
-
-    if (!text || !text.trim()) {
-      return res.status(400).json({ error: "논문 내용이 입력되지 않았습니다." });
-    }
-
-    const client = getGenAI();
-
-    const systemInstruction = `당신은 대한민국 건강보험심사평가원(심평원) 등에 제출할 임상시험 문헌 요약표(전문 신약 청구 서식 - 표6 제출 자료)를 편찬하는 자문 의학 분석가입니다.
+const SYSTEM_INSTRUCTION = `당신은 대한민국 건강보험심사평가원(심평원) 등에 제출할 임상시험 문헌 요약표(전문 신약 청구 서식 - 표6 제출 자료)를 편찬하는 자문 의학 분석가입니다.
 입력문헌의 모든 구체적인 임상 수치, 포함/제외 요건의 나열, 임상 환자의 탈락 Flow-chart 상의 명수 및 사유, 그리고 유효성 및 안전성(Any grade vs Grade 3/4 이상반응 명수 및 비율)은 원문에 나타난 바를 한글 의학 용어로 상세히 해석하여 제공하십시오.
 
 [작성 수칙 - 반려 제로화 전략 및 "~임.", "~함." 종결 필수]
-1. [핵심] 완벽한 "~임.", "~함." 문장 종결체 원칙:
-   - 모든 텍스트의 각 세부 줄(Bullet point 포함)은 단순히 숫자나 영문 약어만 기재되어선 절대 안 되며, 반드시 상세 내용 및 수치 서술과 함께 마지막 어미가 한국어 명사형 격식체인 "~임.", "~함.", "~확인됨.", "~투여됨.", "~나타남.", "~비교됨.", "~제외됨.", "~포함됨." 등으로 확실하고 완벽하게 끝맺음되어야 합니다.
-   - 예시 (나쁜 예): "- mPFS: 시험군 NR, 대조군 52.6개월"
-   - 예시 (좋은 예): "- 무진행 생존기간(mPFS)의 경우: 시험군은 중앙값에 도달하지 않았으나(NR), 대조군은 52.6개월로 현저한 임상적 격차를 보이며 개선됨."
+1. 모든 텍스트의 각 세부 줄(Bullet point 포함)은 반드시 상세 내용 및 수치 서술과 함께 "~임.", "~함.", "~확인됨.", "~투여됨.", "~나타남." 등으로 확실하고 완벽하게 끝맺음되어야 합니다.
+   - 나쁜 예: "- mPFS: 시험군 NR, 대조군 52.6개월"
+   - 좋은 예: "- 무진행 생존기간(mPFS)의 경우: 시험군은 중앙값에 도달하지 않았으나(NR), 대조군은 52.6개월로 현저한 임상적 격차를 보이며 개선됨."
 
-2. [핵심 안내] 피험자 특성 및 중도 탈락 기술 방식:
-   - 두 군(시험군 vs 대조군)의 특성과 중도 탈락 흐름을 단순히 숫자만 늘어놓는 하드코딩 형식으로 적지 마십시오.
-   - 반드시 의학적으로 정돈된 분석적 문장으로 서술하되, 문장 어미는 반드시 "~임.", "~함.", "~확인됨." 등으로 세련되게 작성하십시오.
+2. 피험자 특성 및 중도 탈락 기술: 단순 숫자 나열 금지. 의학적으로 정돈된 분석적 문장으로 서술하되 어미는 "~임.", "~함.", "~확인됨." 등으로 마무리.
 
-3. [핵심 안내] 안전성 결과(Safety) 기입 가이드라인:
-   - 논문 본문(Main Body Text)에 핵심적으로 중요하게 하이라이트된 주요 부작용들(최대 5~7개의 유의미한 주요 안전성 지표)만 엄선하여 작성하십시오.
-   - 선별된 안전성 데이터 역시 반드시 시험군 및 대조군의 발생율 및 중증도 수치를 비교 서술하고, 어미를 "~임.", "~함." 등으로 확실하게 종결체로 정리하십시오.
+3. 안전성 결과: 논문 본문에서 핵심적으로 하이라이트된 주요 부작용 5~7개만 엄선. 시험군·대조군 발생률 및 중증도 수치를 비교 서술하고 "~임.", "~함." 으로 종결.
 
-4. 통계 수치 완전성: PFS, OS 등의 위험비(HR), 신뢰구간(95% CI), P-value는 절대로 생략하거나 축약하지 말고 완벽한 세트로 기입하며, 마지막은 역시 "~임."으로 종결하십시오.
-5. 선정 및 제외 기준 목록화: 원문에 나열된 조건이 있을 경우, 10개 이상이 되더라도 누락 없이 모두 수치를 꼼꼼히 적고, 끝에 반드시 '~임.'을 붙이십시오.
-6. 절대 줄글(긴 서술형 문단) 쓰기 금지: 모든 텍스트 필드는 반드시 한 줄에 하나씩 '- 항목명: 내용 및 서술(~임).' 또는 숫자가 있는 리스트 방식으로 작성하십시오.
-7. 가독성 극대화: 각 세부 서술에서 마크다운 볼드(**) 기법을 사용해 핵심 비교 지표나 통계치를 감싸줌으로써 깔끔하게 부각되게 처리하십시오.`;
+4. 통계 수치 완전성: HR, 95% CI, P-value는 절대 생략하지 말고 완벽한 세트로 기입하며 "~임."으로 종결.
 
-    const prompt = `다음 임상문헌 내용을 심평원 양식에 맞추어 완벽하게 구조화해 주십시오.
+5. 선정·제외 기준: 10개 이상이더라도 누락 없이 수치 포함하여 모두 기재, 끝에 "~임." 필수.
+
+6. 절대 줄글 금지: 반드시 "- 항목명: 내용(~임)." 또는 숫자 리스트 방식으로 작성.
+
+7. 가독성: 마크다운 볼드(**) 기법으로 핵심 통계치 강조.`;
+
+const RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string", description: "논문 제목 전체 (영어 원문 + 괄호 안에 한글 번역 병기)" },
+    citation: { type: "string", description: "저자명. 저널명. 연도;권(호):페이지 형식 표준 서지" },
+    countries: { type: "string", description: "연구 참여 국가 목록 (쉼표 구분)" },
+    authors: { type: "string", description: "주저자 및 공저자 (예: Usmani SZ et al.)" },
+    affiliation: { type: "string", description: "교신저자 소속기관 (영문 + 한글 번역)" },
+    objective: { type: "string", description: "연구 목적 (~함. ~임. 종결체로 기재)" },
+    inclusion: { type: "string", description: "포함 기준 전체 (1) 항목: 내용임.\\n2) 항목: 내용임. 형식, 수치 포함)" },
+    exclusion: { type: "string", description: "제외 기준 전체 (1) 항목: 내용임.\\n 형식)" },
+    studyPeriod: { type: "string", description: "○ 등록 기간: YYYY.MM ~ YYYY.MM임.\\n○ 추적관찰 기간(중앙값): N개월임.\\n○ 자료수집완료일: YYYY.MM.DD임." },
+    studyDesign: { type: "string", description: "연구 설계, 무작위배정 방법, 층화 기준 등 (~임. 종결 리스트)" },
+    intervention: { type: "string", description: "시험군 약물 용량·경로·주기 상세 (~함. ~임. 종결 리스트)" },
+    control: { type: "string", description: "대조군 약물 용량·경로·주기 상세 (~함. ~임. 종결 리스트)" },
+    primaryEndpoint: { type: "string", description: "1차 평가변수 정의 및 측정 방법 (~으로 정의됨. 종결)" },
+    secondaryEndpoints: { type: "string", description: "2차 평가변수 전체 목록 및 정의 (리스트, ~임. 종결)" },
+    patientCharacteristics: { type: "string", description: "양군 기저 특성 비교 (연령·성별·ECOG·ISS·세포유전학적 위험도 등, 1:1 비교 서술, ~임. 종결)" },
+    dropout: { type: "string", description: "중도탈락 환자 수 및 사유 (군별 구분, ~임. 종결)" },
+    results: { type: "string", description: "○ 유효성 결과\\n(1차·2차 평가변수 수치, OR/HR, 95% CI, p값)\\n\\n○ 안전성 결과\\n(주요 이상반응 5~7개, 등급별 발현율 비교, ~임. 종결)" },
+    conclusion: { type: "string", description: "저자 결론 요약 (~임. ~함. 종결, 2~3문장)" },
+    limitations: { type: "string", description: "연구 한계점 2~3개 (~이 한계임. 종결)" },
+    sponsor: { type: "string", description: "연구 후원자 (~에서 후원함. 종결)" },
+    sensitivityAnalysis: { type: "string", description: "민감도 분석 결과 (없으면 '해당 정보 없음')" },
+    researcherPerspective: { type: "string", description: "연구자 추가 언급사항 (없으면 '해당 정보 없음')" },
+  },
+  required: [
+    "title","citation","countries","authors","affiliation",
+    "objective","inclusion","exclusion","studyPeriod","studyDesign",
+    "intervention","control","primaryEndpoint","secondaryEndpoints",
+    "patientCharacteristics","dropout","results","conclusion",
+    "limitations","sponsor","sensitivityAnalysis","researcherPerspective"
+  ],
+};
+
+export default async function handler(req: Request): Promise<Response> {
+  // CORS
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+  if (req.method !== "POST") {
+    return Response.json({ error: "POST 요청만 허용됩니다." }, { status: 405, headers: corsHeaders });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return Response.json(
+      { error: "GEMINI_API_KEY 환경변수가 설정되지 않았습니다. Vercel 프로젝트 설정 > Environment Variables에서 추가해 주세요." },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+
+  let body: { text?: string; type?: string; seq?: number; extra?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: "요청 본문을 파싱하지 못했습니다." }, { status: 400, headers: corsHeaders });
+  }
+
+  const { text, type = "RCT", seq = 1, extra = "없음" } = body;
+  if (!text?.trim()) {
+    return Response.json({ error: "논문 내용이 입력되지 않았습니다." }, { status: 400, headers: corsHeaders });
+  }
+
+  const prompt = `다음 임상문헌 내용을 심평원 양식에 맞추어 완벽하게 구조화해 주십시오.
 
 [기본 정보]
-- 신청 연번: ${seq || 1}
-- 문헌 내용 구분형태: ${type || "RCT"}
-- 추가 요구사항: ${extra || "없음"}
+- 신청 연번: ${seq}
+- 문헌 내용 구분형태: ${type}
+- 추가 요구사항: ${extra}
 
 [분석할 논문 원문/요약 텍스트]
 ${text}
 
 추출 가이드라인에 맞춰 빈 항목 없이 꼼꼼하게 작성해 주세요.`;
 
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        title: { type: Type.STRING },
-        citation: { type: Type.STRING },
-        countries: { type: Type.STRING },
-        authors: { type: Type.STRING },
-        affiliation: { type: Type.STRING },
-        objective: { type: Type.STRING },
-        inclusion: { type: Type.STRING },
-        exclusion: { type: Type.STRING },
-        studyPeriod: { type: Type.STRING },
-        studyDesign: { type: Type.STRING },
-        intervention: { type: Type.STRING },
-        control: { type: Type.STRING },
-        primaryEndpoint: { type: Type.STRING },
-        secondaryEndpoints: { type: Type.STRING },
-        patientCharacteristics: { type: Type.STRING },
-        dropout: { type: Type.STRING },
-        results: { type: Type.STRING },
-        conclusion: { type: Type.STRING },
-        limitations: { type: Type.STRING },
-        sponsor: { type: Type.STRING },
-        sensitivityAnalysis: { type: Type.STRING },
-        researcherPerspective: { type: Type.STRING },
-      },
-      required: [
-        "title", "citation", "countries", "authors", "affiliation",
-        "objective", "inclusion", "exclusion", "studyPeriod", "studyDesign",
-        "intervention", "control", "primaryEndpoint", "secondaryEndpoints",
-        "patientCharacteristics", "dropout", "results", "conclusion",
-        "limitations", "sponsor", "sensitivityAnalysis", "researcherPerspective",
-      ],
-    };
+  // Gemini REST API 직접 호출 (Edge Runtime은 SDK 사용 불가, fetch 사용)
+  // gemini-2.0-flash: 빠르고 구조화 출력 지원, 타임아웃 위험 낮음
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
-    // 사용 가능한 최신 Gemini 모델로 수정 (gemini-3.5-flash는 존재하지 않음)
-    const response = await client.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema,
-        temperature: 0.2,
-      },
+  let geminiResp: Response;
+  try {
+    geminiResp = await fetch(geminiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_instruction: {
+          parts: [{ text: SYSTEM_INSTRUCTION }],
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: RESPONSE_SCHEMA,
+          temperature: 0.2,
+          maxOutputTokens: 8192,
+        },
+      }),
     });
-
-    const responseText = response.text;
-    if (!responseText) {
-      throw new Error("Gemini API가 빈 응답을 반환했습니다.");
-    }
-
-    const parsedJSON = JSON.parse(responseText.trim());
-    return res.status(200).json(parsedJSON);
-  } catch (error: any) {
-    console.error("summarize api failed:", error);
-    return res.status(500).json({
-      error: error?.message || "문헌 분석 중 알 수 없는 서버 오류가 발생하였습니다.",
-    });
+  } catch (fetchErr: any) {
+    return Response.json(
+      { error: `Gemini API 연결 실패: ${fetchErr.message}` },
+      { status: 502, headers: corsHeaders }
+    );
   }
+
+  if (!geminiResp.ok) {
+    const errText = await geminiResp.text();
+    let errMsg = `Gemini API 오류 (${geminiResp.status})`;
+    try {
+      const errJson = JSON.parse(errText);
+      errMsg = errJson?.error?.message || errMsg;
+    } catch {}
+    // API 키 관련 오류 친절하게 안내
+    if (geminiResp.status === 400 || geminiResp.status === 403) {
+      errMsg = `API 키 오류: ${errMsg}\nVercel 환경변수 GEMINI_API_KEY 값을 확인해 주세요.`;
+    }
+    return Response.json({ error: errMsg }, { status: geminiResp.status, headers: corsHeaders });
+  }
+
+  const geminiData: any = await geminiResp.json();
+
+  const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) {
+    return Response.json(
+      { error: "Gemini API가 빈 응답을 반환했습니다. 잠시 후 다시 시도해 주세요." },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+
+  let parsed: Record<string, string>;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    return Response.json(
+      { error: "AI 응답을 JSON으로 파싱하지 못했습니다.\n원문 응답:\n" + rawText.slice(0, 300) },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+
+  return Response.json(parsed, { status: 200, headers: corsHeaders });
 }

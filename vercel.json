@@ -1,6 +1,4 @@
 {
-  "buildCommand": "npm run build:vercel",
-  "outputDirectory": "dist",
   "rewrites": [
     {
       "source": "/api/:path*",
@@ -10,10 +8,5 @@
       "source": "/((?!api).*)",
       "destination": "/index.html"
     }
-  ],
-  "functions": {
-    "api/summarize.ts": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }
