@@ -158,8 +158,9 @@ ${text.slice(0, 8000)}
           system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
           contents: [{ role: "user", parts: [{ text: userPrompt }] }],
           generationConfig: {
-            temperature: 0.15,
+            temperature: 0.1,
             maxOutputTokens: 8192,
+            responseMimeType: "application/json", // ← JSON만 출력 강제 (마크다운 블록, 전문 텍스트 제거)
           },
         }),
       });
@@ -218,17 +219,43 @@ ${text.slice(0, 8000)}
 
       if (!accumulated.trim()) throw new Error("AI 응답이 비어있습니다. 잠시 후 다시 시도해 주세요.");
 
-      // JSON 블록 추출 및 파싱
-      let jsonStr = accumulated.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
-      const s = jsonStr.indexOf("{");
-      const e = jsonStr.lastIndexOf("}");
-      if (s !== -1 && e !== -1) jsonStr = jsonStr.slice(s, e + 1);
+      // ── JSON 복구 파이프라인 ──────────────────────────────────────
+      const repairJSON = (raw: string): string => {
+        // 1) 마크다운 코드블록 제거
+        let s = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/gi, "").trim();
+        // 2) 첫 { ~ 마지막 } 추출
+        const start = s.indexOf("{");
+        const end   = s.lastIndexOf("}");
+        if (start !== -1 && end !== -1) s = s.slice(start, end + 1);
+        // 3) JSON 문자열 값 내부의 제어문자 이스케이프 (가장 흔한 파싱 오류 원인)
+        //    문자열 값 안에서만 실제 줄바꿈/탭을 \\n/\\t 로 변환
+        s = s.replace(/"((?:[^"\\]|\\.)*)"/g, (_match: string, inner: string) => {
+          const fixed = inner
+            .replace(/\r\n/g, "\\n")
+            .replace(/\r/g,   "\\n")
+            .replace(/\n/g,   "\\n")
+            .replace(/\t/g,   "\\t");
+          return `"${fixed}"`;
+        });
+        // 4) 후행 콤마 제거
+        s = s.replace(/,(\s*[}\]])/g, "$1");
+        return s;
+      };
+
+      const jsonStr = repairJSON(accumulated);
 
       let summaryResult: LiteratureSummary;
       try {
         summaryResult = JSON.parse(jsonStr);
-      } catch {
-        throw new Error("AI 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.");
+      } catch (parseErr) {
+        // 복구 후에도 실패 시 — 원문 앞부분을 에러 메시지에 표시
+        const preview = accumulated.slice(0, 200).replace(/\n/g, " ");
+        throw new Error(
+          `AI 응답을 JSON으로 변환하지 못했습니다.\n\n` +
+          `원인: ${String(parseErr)}\n\n` +
+          `응답 앞부분: ${preview}\n\n` +
+          `→ 잠시 후 다시 시도하거나, 논문 텍스트를 줄여서 입력해 주세요.`
+        );
       }
 
       setCurrentSummary(summaryResult);
