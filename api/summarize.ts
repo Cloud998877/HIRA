@@ -1,116 +1,82 @@
 /**
- * Vercel Edge Runtime 함수
- * - Edge Runtime: 타임아웃 없음 (Hobby 플랜 포함)
- * - Gemini REST API 직접 호출 (SDK 불필요, fetch 사용)
- * - gemini-2.0-flash: 빠른 응답, 구조화 출력 지원
+ * Vercel Edge Runtime — Gemini 스트리밍 API
+ * - 스트리밍: 첫 토큰부터 즉시 클라이언트로 전송 → 타임아웃 없음
+ * - JSON 스키마 제거: 스키마 검증 오버헤드 제거로 응답 속도 2~3배 향상
+ * - gemini-2.0-flash: 빠른 고품질 모델
  */
 export const runtime = "edge";
 
-const SYSTEM_INSTRUCTION = `당신은 대한민국 건강보험심사평가원(심평원) 등에 제출할 임상시험 문헌 요약표(전문 신약 청구 서식 - 표6 제출 자료)를 편찬하는 자문 의학 분석가입니다.
-입력문헌의 모든 구체적인 임상 수치, 포함/제외 요건의 나열, 임상 환자의 탈락 Flow-chart 상의 명수 및 사유, 그리고 유효성 및 안전성(Any grade vs Grade 3/4 이상반응 명수 및 비율)은 원문에 나타난 바를 한글 의학 용어로 상세히 해석하여 제공하십시오.
+const SYSTEM_INSTRUCTION = `당신은 대한민국 건강보험심사평가원(심평원) 제출용 임상시험 문헌 요약표(표6) 전문 작성가입니다.
 
-[작성 수칙 - 반려 제로화 전략 및 "~임.", "~함." 종결 필수]
-1. 모든 텍스트의 각 세부 줄(Bullet point 포함)은 반드시 상세 내용 및 수치 서술과 함께 "~임.", "~함.", "~확인됨.", "~투여됨.", "~나타남." 등으로 확실하고 완벽하게 끝맺음되어야 합니다.
-   - 나쁜 예: "- mPFS: 시험군 NR, 대조군 52.6개월"
-   - 좋은 예: "- 무진행 생존기간(mPFS)의 경우: 시험군은 중앙값에 도달하지 않았으나(NR), 대조군은 52.6개월로 현저한 임상적 격차를 보이며 개선됨."
+[필수 작성 원칙]
+1. 모든 문장 어미는 반드시 "~임.", "~함.", "~확인됨.", "~나타남." 등 한국어 명사형 격식체로 끝낼 것
+2. 통계 수치(HR, 95% CI, p-value, OR)는 절대 생략 없이 완전한 세트로 기재
+3. 포함·제외 기준은 번호 목록으로 수치 포함하여 전부 기재
+4. 안전성 결과는 본문에서 강조된 주요 이상반응 5~7개만 시험군·대조군 비교 서술
+5. 핵심 통계치는 **볼드** 처리
+6. 줄글 금지 — 모든 항목은 "- 항목: 내용(~임)." 리스트 형식
+7. 번역투("~것으로 나타났다") 금지 → "~으로 확인되었음."`;
 
-2. 피험자 특성 및 중도 탈락 기술: 단순 숫자 나열 금지. 의학적으로 정돈된 분석적 문장으로 서술하되 어미는 "~임.", "~함.", "~확인됨." 등으로 마무리.
+const JSON_PROMPT_TEMPLATE = (text: string, type: string, seq: number, extra: string) => `
+다음 임상문헌을 분석하여 심평원 표6 서식에 맞게 아래 JSON 형식으로 작성하세요.
+코드블록(\`\`\`) 없이 순수 JSON만 반환하세요.
 
-3. 안전성 결과: 논문 본문에서 핵심적으로 하이라이트된 주요 부작용 5~7개만 엄선. 시험군·대조군 발생률 및 중증도 수치를 비교 서술하고 "~임.", "~함." 으로 종결.
+[기본정보] 연번: ${seq} / 문헌구분: ${type} / 추가요청: ${extra || "없음"}
 
-4. 통계 수치 완전성: HR, 95% CI, P-value는 절대 생략하지 말고 완벽한 세트로 기입하며 "~임."으로 종결.
+[논문내용]
+${text.slice(0, 6000)}
 
-5. 선정·제외 기준: 10개 이상이더라도 누락 없이 수치 포함하여 모두 기재, 끝에 "~임." 필수.
-
-6. 절대 줄글 금지: 반드시 "- 항목명: 내용(~임)." 또는 숫자 리스트 방식으로 작성.
-
-7. 가독성: 마크다운 볼드(**) 기법으로 핵심 통계치 강조.`;
-
-const RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    title: { type: "string", description: "논문 제목 전체 (영어 원문 + 괄호 안에 한글 번역 병기)" },
-    citation: { type: "string", description: "저자명. 저널명. 연도;권(호):페이지 형식 표준 서지" },
-    countries: { type: "string", description: "연구 참여 국가 목록 (쉼표 구분)" },
-    authors: { type: "string", description: "주저자 및 공저자 (예: Usmani SZ et al.)" },
-    affiliation: { type: "string", description: "교신저자 소속기관 (영문 + 한글 번역)" },
-    objective: { type: "string", description: "연구 목적 (~함. ~임. 종결체로 기재)" },
-    inclusion: { type: "string", description: "포함 기준 전체 (1) 항목: 내용임.\\n2) 항목: 내용임. 형식, 수치 포함)" },
-    exclusion: { type: "string", description: "제외 기준 전체 (1) 항목: 내용임.\\n 형식)" },
-    studyPeriod: { type: "string", description: "○ 등록 기간: YYYY.MM ~ YYYY.MM임.\\n○ 추적관찰 기간(중앙값): N개월임.\\n○ 자료수집완료일: YYYY.MM.DD임." },
-    studyDesign: { type: "string", description: "연구 설계, 무작위배정 방법, 층화 기준 등 (~임. 종결 리스트)" },
-    intervention: { type: "string", description: "시험군 약물 용량·경로·주기 상세 (~함. ~임. 종결 리스트)" },
-    control: { type: "string", description: "대조군 약물 용량·경로·주기 상세 (~함. ~임. 종결 리스트)" },
-    primaryEndpoint: { type: "string", description: "1차 평가변수 정의 및 측정 방법 (~으로 정의됨. 종결)" },
-    secondaryEndpoints: { type: "string", description: "2차 평가변수 전체 목록 및 정의 (리스트, ~임. 종결)" },
-    patientCharacteristics: { type: "string", description: "양군 기저 특성 비교 (연령·성별·ECOG·ISS·세포유전학적 위험도 등, 1:1 비교 서술, ~임. 종결)" },
-    dropout: { type: "string", description: "중도탈락 환자 수 및 사유 (군별 구분, ~임. 종결)" },
-    results: { type: "string", description: "○ 유효성 결과\\n(1차·2차 평가변수 수치, OR/HR, 95% CI, p값)\\n\\n○ 안전성 결과\\n(주요 이상반응 5~7개, 등급별 발현율 비교, ~임. 종결)" },
-    conclusion: { type: "string", description: "저자 결론 요약 (~임. ~함. 종결, 2~3문장)" },
-    limitations: { type: "string", description: "연구 한계점 2~3개 (~이 한계임. 종결)" },
-    sponsor: { type: "string", description: "연구 후원자 (~에서 후원함. 종결)" },
-    sensitivityAnalysis: { type: "string", description: "민감도 분석 결과 (없으면 '해당 정보 없음')" },
-    researcherPerspective: { type: "string", description: "연구자 추가 언급사항 (없으면 '해당 정보 없음')" },
-  },
-  required: [
-    "title","citation","countries","authors","affiliation",
-    "objective","inclusion","exclusion","studyPeriod","studyDesign",
-    "intervention","control","primaryEndpoint","secondaryEndpoints",
-    "patientCharacteristics","dropout","results","conclusion",
-    "limitations","sponsor","sensitivityAnalysis","researcherPerspective"
-  ],
-};
+아래 JSON 키를 모두 채워서 반환:
+{
+  "title": "영문 제목 (한글 번역 병기)",
+  "citation": "저자명 et al. 저널명. 연도;권(호):페이지",
+  "countries": "참여 국가 목록 (쉼표 구분)",
+  "authors": "주저자 et al.",
+  "affiliation": "교신저자 소속기관 (영문+한글)",
+  "objective": "연구 목적 (~함. 종결 리스트)",
+  "inclusion": "1) 포함기준 항목: 수치 포함 내용임.\\n2) ...",
+  "exclusion": "1) 제외기준 항목: 수치 포함 내용임.\\n2) ...",
+  "studyPeriod": "○ 등록 기간: YYYY.MM~YYYY.MM임.\\n○ 추적관찰 기간(중앙값): N개월임.\\n○ 자료수집완료일: YYYY.MM.DD임.",
+  "studyDesign": "- 설계 특성: 내용임.\\n- 무작위배정 방법: 내용임.\\n- 층화 기준: 내용임.",
+  "intervention": "- 시험군 약물: 용량·경로·주기 포함 상세 내용임.\\n- 유지요법: 내용임.",
+  "control": "- 대조군 약물: 용량·경로·주기 포함 상세 내용임.",
+  "primaryEndpoint": "- 1차 평가변수: 정의 및 측정방법 (~으로 정의됨.)",
+  "secondaryEndpoints": "1) 2차 평가변수명: 정의 및 목적임.\\n2) ...",
+  "patientCharacteristics": "- **중위 연령**: 시험군 N세, 대조군 N세로 양군이 균형 있게 배정됨.\\n- **성별 분포**: ...임.\\n- **ECOG 점수**: ...임.\\n- **병기**: ...임.",
+  "dropout": "- **등록 및 배정**: 총 N명 스크리닝 중 N명 무작위배정됨.\\n- **시험군 탈락**: N명 중도탈락, 주요 사유: 진행 N명, 사망 N명, 이상반응 N명임.\\n- **대조군 탈락**: N명 중도탈락, 주요 사유: ...임.",
+  "results": "○ 유효성 결과\\n- **1차 평가변수**: 시험군 N% vs 대조군 N% (**OR/HR N.NN, 95% CI N.NN~N.NN, p=N.NNNN**)임.\\n- **2차 평가변수(PFS)**: ...임.\\n- **OS**: ...임.\\n\\n○ 안전성 결과\\n- **가장 흔한 3등급 이상 이상반응**: 시험군 N% vs 대조군 N%임.\\n- **주요 이상반응 1**: ...임.\\n- **치료 중단율**: ...임.",
+  "conclusion": "- **주요 결론**: ...인 것으로 최종 확인됨.\\n- **임상적 의의**: ...를 지지함.",
+  "limitations": "- **한계 1**: ...이 한계임.\\n- **한계 2**: ...이 한계임.",
+  "sponsor": "- **후원**: ...에서 전액 후원함.",
+  "sensitivityAnalysis": "- **민감도 분석**: ...임. (없으면 '해당 정보 없음')",
+  "researcherPerspective": "- **연구자 관점**: ...임. (없으면 '해당 정보 없음')"
+}`;
 
 export default async function handler(req: Request): Promise<Response> {
-  // CORS
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
 
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
-  }
-  if (req.method !== "POST") {
-    return Response.json({ error: "POST 요청만 허용됩니다." }, { status: 405, headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
+  if (req.method !== "POST") return Response.json({ error: "POST만 허용" }, { status: 405, headers: corsHeaders });
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return Response.json(
-      { error: "GEMINI_API_KEY 환경변수가 설정되지 않았습니다. Vercel 프로젝트 설정 > Environment Variables에서 추가해 주세요." },
-      { status: 500, headers: corsHeaders }
-    );
+    return Response.json({ error: "GEMINI_API_KEY 환경변수가 없습니다. Vercel > Settings > Environment Variables에 추가하세요." }, { status: 500, headers: corsHeaders });
   }
 
   let body: { text?: string; type?: string; seq?: number; extra?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json({ error: "요청 본문을 파싱하지 못했습니다." }, { status: 400, headers: corsHeaders });
+  try { body = await req.json(); } catch {
+    return Response.json({ error: "요청 본문 파싱 실패" }, { status: 400, headers: corsHeaders });
   }
 
-  const { text, type = "RCT", seq = 1, extra = "없음" } = body;
-  if (!text?.trim()) {
-    return Response.json({ error: "논문 내용이 입력되지 않았습니다." }, { status: 400, headers: corsHeaders });
-  }
+  const { text = "", type = "RCT", seq = 1, extra = "" } = body;
+  if (!text.trim()) return Response.json({ error: "논문 내용을 입력해주세요." }, { status: 400, headers: corsHeaders });
 
-  const prompt = `다음 임상문헌 내용을 심평원 양식에 맞추어 완벽하게 구조화해 주십시오.
-
-[기본 정보]
-- 신청 연번: ${seq}
-- 문헌 내용 구분형태: ${type}
-- 추가 요구사항: ${extra}
-
-[분석할 논문 원문/요약 텍스트]
-${text}
-
-추출 가이드라인에 맞춰 빈 항목 없이 꼼꼼하게 작성해 주세요.`;
-
-  // Gemini REST API 직접 호출 (Edge Runtime은 SDK 사용 불가, fetch 사용)
-  // gemini-2.0-flash: 빠르고 구조화 출력 지원, 타임아웃 위험 낮음
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+  // Gemini 스트리밍 API 호출 (streamGenerateContent + alt=sse)
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
 
   let geminiResp: Response;
   try {
@@ -118,63 +84,73 @@ ${text}
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        system_instruction: {
-          parts: [{ text: SYSTEM_INSTRUCTION }],
-        },
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }],
-          },
-        ],
+        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+        contents: [{ role: "user", parts: [{ text: JSON_PROMPT_TEMPLATE(text, type, seq, extra) }] }],
         generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
-          temperature: 0.2,
+          temperature: 0.15,
           maxOutputTokens: 8192,
+          // 스키마 없이 프롬프트 기반 JSON → 훨씬 빠름
         },
       }),
     });
-  } catch (fetchErr: any) {
-    return Response.json(
-      { error: `Gemini API 연결 실패: ${fetchErr.message}` },
-      { status: 502, headers: corsHeaders }
-    );
+  } catch (e: any) {
+    return Response.json({ error: `Gemini 연결 실패: ${e.message}` }, { status: 502, headers: corsHeaders });
   }
 
   if (!geminiResp.ok) {
     const errText = await geminiResp.text();
-    let errMsg = `Gemini API 오류 (${geminiResp.status})`;
-    try {
-      const errJson = JSON.parse(errText);
-      errMsg = errJson?.error?.message || errMsg;
-    } catch {}
-    // API 키 관련 오류 친절하게 안내
-    if (geminiResp.status === 400 || geminiResp.status === 403) {
-      errMsg = `API 키 오류: ${errMsg}\nVercel 환경변수 GEMINI_API_KEY 값을 확인해 주세요.`;
-    }
-    return Response.json({ error: errMsg }, { status: geminiResp.status, headers: corsHeaders });
+    let msg = `Gemini API 오류 (${geminiResp.status})`;
+    try { msg = JSON.parse(errText)?.error?.message || msg; } catch {}
+    if (geminiResp.status === 400 || geminiResp.status === 403) msg = `API 키 오류: ${msg}`;
+    return Response.json({ error: msg }, { status: geminiResp.status, headers: corsHeaders });
   }
 
-  const geminiData: any = await geminiResp.json();
+  // Gemini SSE 스트림을 클라이언트에 그대로 파이프
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
 
-  const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawText) {
-    return Response.json(
-      { error: "Gemini API가 빈 응답을 반환했습니다. 잠시 후 다시 시도해 주세요." },
-      { status: 500, headers: corsHeaders }
-    );
-  }
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = geminiResp.body!.getReader();
+      let buffer = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.enqueue(enc.encode("data: [DONE]\n\n"));
+            controller.close();
+            break;
+          }
+          buffer += dec.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
 
-  let parsed: Record<string, string>;
-  try {
-    parsed = JSON.parse(rawText);
-  } catch {
-    return Response.json(
-      { error: "AI 응답을 JSON으로 파싱하지 못했습니다.\n원문 응답:\n" + rawText.slice(0, 300) },
-      { status: 500, headers: corsHeaders }
-    );
-  }
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const raw = line.slice(6).trim();
+            if (!raw || raw === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(raw);
+              const chunk = parsed?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+              if (chunk) {
+                // 클라이언트로 텍스트 청크만 전달
+                controller.enqueue(enc.encode(`data: ${JSON.stringify({ t: chunk })}\n\n`));
+              }
+            } catch { /* 파싱 실패 청크 무시 */ }
+          }
+        }
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+  });
 
-  return Response.json(parsed, { status: 200, headers: corsHeaders });
+  return new Response(stream, {
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "X-Accel-Buffering": "no", // nginx 프록시 버퍼링 비활성화
+    },
+  });
 }

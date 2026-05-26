@@ -78,75 +78,112 @@ export default function App() {
 
     setLoading(true);
     setErrorMessage(null);
-    setLoadingStep("임상시험 데이터 전송 중...");
+    setLoadingStep("AI와 연결 중...");
 
     try {
-      // Simulate stepwise progress indicator for smooth UX
-      const progressSteps = [
-        "영문 의학 문헌 해독 및 분석 개시...",
-        "환자 포함/제외 기준 가공 수치화...",
-        "통계적 검정치(HR, P-value, Confidence Interval) 정합성 대조...",
-        "이상반응 등급 및 안전성 데이터 국문 교정...",
-        "심평원 표6서식 규격에 맞게 맵핑 완료 중..."
-      ];
-
-      let stepIndex = 0;
-      const interval = setInterval(() => {
-        if (stepIndex < progressSteps.length) {
-          setLoadingStep(progressSteps[stepIndex]);
-          stepIndex++;
-        }
-      }, 1200);
-
-      // Perform real server side API call
+      // 스트리밍 fetch — 서버가 토큰을 실시간으로 보내주므로 타임아웃 없음
       const response = await fetch("/api/summarize", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          seq,
-          type,
-          text,
-          extra,
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seq, type, text, extra }),
       });
 
-      clearInterval(interval);
-
+      // 초기 연결 오류 처리 (스트림 시작 전 에러)
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `서버 오류가 발생했습니다 (코드: ${response.status})`);
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `서버 오류 (코드: ${response.status})`);
       }
 
-      const summaryResult: LiteratureSummary = await response.json();
+      if (!response.body) throw new Error("스트리밍 응답을 받지 못했습니다.");
 
-      // Set states
+      // SSE 스트림 읽기
+      const reader = response.body.getReader();
+      const dec = new TextDecoder();
+      let accumulated = "";
+      let buf = "";
+      let charCount = 0;
+
+      const steps = [
+        "영문 의학 문헌 해독 중...",
+        "포함·제외 기준 추출 중...",
+        "통계치(HR, CI, p-value) 대조 중...",
+        "이상반응 국문 교정 중...",
+        "심평원 표6 서식 맵핑 중...",
+      ];
+      let stepIdx = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (!raw || raw === "[DONE]") continue;
+          try {
+            const chunk = JSON.parse(raw);
+            if (chunk.t) {
+              accumulated += chunk.t;
+              charCount += chunk.t.length;
+              // 진행 단계 업데이트
+              if (charCount > stepIdx * 400 && stepIdx < steps.length) {
+                setLoadingStep(steps[stepIdx]);
+                stepIdx++;
+              }
+            }
+            // 오류 청크 처리
+            if (chunk.error) throw new Error(chunk.error);
+          } catch (parseErr: any) {
+            if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
+          }
+        }
+      }
+
+      if (!accumulated.trim()) throw new Error("AI 응답이 비어있습니다. 잠시 후 다시 시도해 주세요.");
+
+      // JSON 파싱: ```json 블록 제거 후 파싱
+      const cleaned = accumulated
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim();
+
+      let summaryResult: LiteratureSummary;
+      try {
+        summaryResult = JSON.parse(cleaned);
+      } catch {
+        // JSON 추출 실패 시 { } 블록 찾기
+        const start = cleaned.indexOf("{");
+        const end = cleaned.lastIndexOf("}");
+        if (start === -1 || end === -1) throw new Error("AI 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.");
+        summaryResult = JSON.parse(cleaned.slice(start, end + 1));
+      }
+
       setCurrentSummary(summaryResult);
       setActiveSummarySeq(seq);
       setActiveSummaryType(type);
 
-      // Create history document
       const newSavedItem: SavedLiterature = {
         id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2, 9),
         seq,
         type,
         uploadedAt: new Date().toLocaleString("ko-KR"),
         inputText: text.slice(0, 500) + (text.length > 500 ? "..." : ""),
-        summary: summaryResult
+        summary: summaryResult,
       };
-
       const updatedHistory = [newSavedItem, ...history.filter(h => h.summary.title !== summaryResult.title)];
       saveHistory(updatedHistory);
 
-      // Navigate
       setActiveTab("table");
-      // Auto increment next input key sequence
       setSeq(prev => prev + 1);
 
     } catch (error: any) {
       console.error(error);
-      setErrorMessage(error.message || "문헌 가공 및 AI 처리 도중 예기치 못한 에러가 발생했습니다.");
+      setErrorMessage(error.message || "문헌 가공 도중 오류가 발생했습니다.");
     } finally {
       setLoading(false);
       setLoadingStep("");
